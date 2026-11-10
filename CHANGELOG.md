@@ -2,6 +2,17 @@
 
 All notable changes to naota-zalo. Newest first.
 
+## [1.10.0] - 2026-11-11
+
+### Added
+- **Live push instead of polling.** With `NAOTA_ZALO_PUSH_URL` set, the MCP server tells the local consumer the moment
+  something lands in the live feed, and when the Zalo connection goes up or down, so NAOTA no longer asks every 20
+  seconds on accounts where nothing arrives. A burst of messages is one request; a failed request is retried with a
+  growing pause (1 s up to 30 s).
+- Safety: the URL must point at this machine (`127.0.0.1`, `localhost`, `::1`) and carry no credentials, otherwise
+  live push stays off. The request is only a wake-up signal: it never carries message content. Without the variable
+  nothing is sent and polling works as before.
+
 ## [1.9.1] - 2026-11-08
 
 ### Fixed
