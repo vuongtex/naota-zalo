@@ -274,6 +274,16 @@ export function registerMCPCommands(program) {
                     const group = await backfillHistory(api, 1, gen);
                     if (gen !== backfillGeneration || !dm || !group) return;
                     syncLog.onBackfill({ dm, group });
+                    // Groups the replay brings that the name cache does not know get their name before the feed, so
+                    // a recovered message from a new group is not listed under a bare id (1.12.0). At most 30, in
+                    // parallel, each capped by ensureGroupName's own timeout.
+                    if (nameCache) {
+                        const unknown = [...new Set(group.raws.map((r) => String(r?.threadId || "")))]
+                            .filter((id) => id && nameCache.needsName(id))
+                            .slice(0, 30);
+                        await Promise.all(unknown.map((id) => nameCache.ensureGroupName(api, id)));
+                        if (gen !== backfillGeneration) return;
+                    }
                     const recovered = feedFrom !== null ? feedRecovered([...dm.raws, ...group.raws], feedFrom) : 0;
                     console.error(
                         `[mcp] History backfill: ${dm.ingested} DM + ${group.ingested} group message(s) across ` +
@@ -348,19 +358,40 @@ export function registerMCPCommands(program) {
                         // Apply noise filter (stickers, system msgs, short emoji)
                         if (!filter.shouldKeep(normalized)) return;
 
-                        // Auto-download media (images, audio, video) in background. Not for our own sends.
-                        if (!normalized.isSelf && normalized.attachment?.url && isDownloadableMedia(normalized.type)) {
-                            const threadName = nameCache?.get(normalized.threadId)?.name || null;
-                            autoDownloadMedia(normalized, {
-                                downloadDir: config.media?.downloadDir || undefined,
-                                threadName,
-                            });
-                        }
+                        const deliver = () => {
+                            // Auto-download media (images, audio, video) in background. Not for our own sends.
+                            if (
+                                !normalized.isSelf &&
+                                normalized.attachment?.url &&
+                                isDownloadableMedia(normalized.type)
+                            ) {
+                                const threadName = nameCache?.get(normalized.threadId)?.name || null;
+                                autoDownloadMedia(normalized, {
+                                    downloadDir: config.media?.downloadDir || undefined,
+                                    threadName,
+                                });
+                            }
 
-                        buffer.push(normalized.threadId, normalized);
-                        // Nobody needs a notification about a message this account sent.
-                        if (!normalized.isSelf) notifier.onMessage(normalized);
-                        console.error(`[mcp] Buffered ${normalized.threadType} msg from ${normalized.threadId}`);
+                            buffer.push(normalized.threadId, normalized);
+                            // Nobody needs a notification about a message this account sent.
+                            if (!normalized.isSelf) notifier.onMessage(normalized);
+                            console.error(`[mcp] Buffered ${normalized.threadType} msg from ${normalized.threadId}`);
+                        };
+
+                        // A group the name cache does not know (joined after start-up): look its name up first, so
+                        // the consumer reading this message already finds the name in zalo_list_threads instead of
+                        // a bare id (1.12.0). The lookup is capped at a few seconds and asked once per group.
+                        if (
+                            nameCache &&
+                            normalized.threadType === "group" &&
+                            nameCache.needsName(normalized.threadId)
+                        ) {
+                            void nameCache
+                                .ensureGroupName(api, normalized.threadId)
+                                .then(guardHandler("message", deliver));
+                            return;
+                        }
+                        deliver();
                     }),
                 );
 
@@ -389,6 +420,9 @@ export function registerMCPCommands(program) {
                 api.listener.on(
                     "group_event",
                     guardHandler("group event", (event) => {
+                        // Most group events carry the group's current name: keep the cache fresh after a rename or
+                        // when this account is added to a group (1.12.0).
+                        nameCache?.noteGroupName(event?.data?.groupId || event?.threadId, event?.data?.groupName);
                         const requests = joinRequestRecordsFromEvent(event);
                         if (requests.length) {
                             void announceJoinRequests(api, requests);

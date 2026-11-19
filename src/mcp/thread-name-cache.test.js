@@ -136,4 +136,75 @@ describe("ThreadNameCache", () => {
             assert.deepEqual(cache.get("new1"), { name: "New Group", type: "group", memberCount: 3 });
         });
     });
+
+    // 1.12.0: the cache is built once at start-up, so a group joined later had no name until a restart.
+    describe("ensureGroupName", () => {
+        it("looks an unknown group up once and caches its name", async () => {
+            let calls = 0;
+            const api = {
+                getGroupInfo: async (id) => {
+                    calls++;
+                    return { gridInfoMap: { [id]: { name: "Nhóm 4 Vĩnh Cửu", totalMember: 9 } } };
+                },
+            };
+            assert.equal(cache.needsName("g9"), true);
+            const [a, b] = await Promise.all([cache.ensureGroupName(api, "g9"), cache.ensureGroupName(api, "g9")]);
+            assert.equal(a, "Nhóm 4 Vĩnh Cửu");
+            assert.equal(b, "Nhóm 4 Vĩnh Cửu");
+            assert.equal(calls, 1, "a burst of messages asks Zalo once");
+            assert.deepEqual(cache.get("g9"), { name: "Nhóm 4 Vĩnh Cửu", type: "group", memberCount: 9 });
+            assert.equal(cache.needsName("g9"), false);
+            assert.equal(await cache.ensureGroupName(api, "g9"), "Nhóm 4 Vĩnh Cửu");
+            assert.equal(calls, 1, "a known group is not asked again");
+        });
+
+        it("treats the '?' placeholder as unknown", async () => {
+            cache.set("g8", { type: "group" });
+            assert.equal(cache.getName("g8"), "?");
+            assert.equal(cache.needsName("g8"), true);
+            const api = { getGroupInfo: async () => ({ gridInfoMap: { g8: { name: "Kho" } } }) };
+            assert.equal(await cache.ensureGroupName(api, "g8"), "Kho");
+        });
+
+        it("never rejects, and backs off after a failure", async () => {
+            let calls = 0;
+            let t = 1000;
+            const api = {
+                getGroupInfo: async () => {
+                    calls++;
+                    throw new Error("rate limited");
+                },
+            };
+            const opts = { retryMs: 60000, now: () => t };
+            assert.equal(await cache.ensureGroupName(api, "g7", opts), null);
+            assert.equal(await cache.ensureGroupName(api, "g7", opts), null);
+            assert.equal(calls, 1, "not asked again inside the back-off");
+            t += 60001;
+            assert.equal(await cache.ensureGroupName(api, "g7", opts), null);
+            assert.equal(calls, 2, "asked again once the back-off is over");
+        });
+
+        it("gives up after the timeout", async () => {
+            const api = { getGroupInfo: () => new Promise(() => {}) };
+            assert.equal(await cache.ensureGroupName(api, "g6", { timeoutMs: 20 }), null);
+            assert.equal(cache.needsName("g6"), true);
+        });
+
+        it("a reply without a name is a failure, not an empty name", async () => {
+            const api = { getGroupInfo: async () => ({ gridInfoMap: {} }) };
+            assert.equal(await cache.ensureGroupName(api, "g5"), null);
+            assert.equal(cache.get("g5"), null);
+        });
+    });
+
+    describe("noteGroupName", () => {
+        it("stores a name from a live event and ignores an empty one", () => {
+            cache.noteGroupName("g4", "Tên mới");
+            assert.equal(cache.getName("g4"), "Tên mới");
+            cache.noteGroupName("g4", "");
+            assert.equal(cache.getName("g4"), "Tên mới");
+            cache.noteGroupName("", "x");
+            assert.equal(cache.size, 1);
+        });
+    });
 });

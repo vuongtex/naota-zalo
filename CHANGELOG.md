@@ -2,6 +2,19 @@
 
 All notable changes to naota-zalo. Newest first.
 
+## [1.12.0] - 2026-11-19
+
+### Fixed
+- **A group joined after start-up now has a name.** The thread name cache was built once when `mcp start` began,
+  so a group the account joined later (or one whose start-up `getGroupInfo` batch failed) had no name until the
+  next restart, and NAOTA listed it under a bare id.
+  - A live message from a group the cache does not know waits for one `getGroupInfo` lookup (at most 4 seconds)
+    before it enters the live feed, so the consumer reading it already finds the name in `zalo_list_threads`.
+    A burst of messages asks once; after a failure the group is not asked again for 10 minutes.
+  - Messages recovered after an outage get the same lookup (up to 30 groups, in parallel) before they are fed.
+  - Group events that carry the group's name (a rename, this account being added) update the cache.
+  - `zalo_list_threads` returns `name: null` instead of the cache's `"?"` placeholder.
+
 ## [1.11.0] - 2026-11-13
 
 ### Added
