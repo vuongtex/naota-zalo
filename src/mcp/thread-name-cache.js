@@ -24,6 +24,87 @@ export class ThreadNameCache {
         /** @type {Map<string, { name: string, type: "group"|"dm", memberCount?: number }>} */
         this._cache = new Map();
         this._ready = false;
+        /** @type {Map<string, Promise<string|null>>} group lookups in flight, so a burst of messages asks once */
+        this._inflight = new Map();
+        /** @type {Map<string, number>} last failed lookup per group (ms), to back off */
+        this._failedAt = new Map();
+    }
+
+    /**
+     * Whether a group's real name is still unknown: not cached, or cached with the "?" placeholder (a group
+     * created by `set()` from an event that had no name).
+     * @param {string} threadId
+     * @returns {boolean}
+     */
+    needsName(threadId) {
+        const name = this._cache.get(threadId)?.name;
+        return !name || name === "?";
+    }
+
+    /**
+     * Record a group's name seen in a live event (a rename, the account being added to a group...). An empty name
+     * leaves the cache alone.
+     * @param {string} groupId
+     * @param {string} name
+     */
+    noteGroupName(groupId, name) {
+        const n = String(name || "").trim();
+        if (!groupId || !n) return;
+        this.set(String(groupId), { name: n, type: "group" });
+        this._failedAt.delete(String(groupId));
+    }
+
+    /**
+     * Look a group's name up on Zalo when the cache does not know it. The cache is built once at start-up, so a group
+     * the account joined later (or one whose start-up batch failed) had no name until the next restart, and the
+     * consumer showed it as a bare id. Resolves to the name, or null on failure, timeout or when there is nothing to
+     * do; never rejects. One lookup per group at a time; after a failure the group is not asked again for
+     * `retryMs`, so a broken group cannot turn every message into a Zalo call.
+     * @param {object} api - zca-js API instance
+     * @param {string} groupId
+     * @param {{ timeoutMs?: number, retryMs?: number, now?: () => number }} [opts]
+     * @returns {Promise<string|null>}
+     */
+    ensureGroupName(api, groupId, { timeoutMs = 4000, retryMs = 10 * 60 * 1000, now = Date.now } = {}) {
+        const id = String(groupId || "");
+        if (!id || !this.needsName(id) || typeof api?.getGroupInfo !== "function") {
+            return Promise.resolve(this.getName(id));
+        }
+        const pending = this._inflight.get(id);
+        if (pending) return pending;
+        const failed = this._failedAt.get(id);
+        if (failed !== undefined && now() - failed < retryMs) return Promise.resolve(null);
+
+        let timer;
+        const lookup = Promise.race([
+            Promise.resolve().then(() => api.getGroupInfo(id)),
+            new Promise((_, reject) => {
+                timer = setTimeout(() => reject(new Error("timeout")), timeoutMs);
+            }),
+        ])
+            .then((info) => {
+                const g = info?.gridInfoMap?.[id];
+                const name = String(g?.name || "").trim();
+                if (!name) throw new Error("no name in the reply");
+                this.set(id, {
+                    name,
+                    type: "group",
+                    ...(g.totalMember !== undefined && { memberCount: g.totalMember }),
+                });
+                this._failedAt.delete(id);
+                return name;
+            })
+            .catch((e) => {
+                this._failedAt.set(id, now());
+                console.error(`[thread-name-cache] getGroupInfo ${id} failed: ${e?.message || e}`);
+                return null;
+            })
+            .finally(() => {
+                clearTimeout(timer);
+                this._inflight.delete(id);
+            });
+        this._inflight.set(id, lookup);
+        return lookup;
     }
 
     /**

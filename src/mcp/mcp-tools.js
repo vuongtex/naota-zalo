@@ -334,7 +334,8 @@ export function registerTools(server, api, buffer, filter, config, nameCache, hi
                     return {
                         ...t,
                         threadType,
-                        name: cached?.name ?? null,
+                        // "?" is the cache's placeholder for a group whose name is not known yet, not a name.
+                        name: cached?.name && cached.name !== "?" ? cached.name : null,
                         ...(cached?.memberCount !== undefined && { memberCount: cached.memberCount }),
                     };
                 });
